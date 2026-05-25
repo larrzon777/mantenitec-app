@@ -719,7 +719,7 @@ elif menu == "Base de datos":
         tipos = ["Todos", "Correctivo", "Preventivo", "Predictivo"]
         tipo_filtro = st.selectbox("Filtrar por tipo de mantenimiento", tipos)
 
-        ordenes_f = ordenes.copy()
+    ordenes_f = ordenes.copy()
 
     if not ordenes_f.empty:
         ordenes_f["fecha_inicio"] = pd.to_datetime(ordenes_f["fecha_inicio"])
