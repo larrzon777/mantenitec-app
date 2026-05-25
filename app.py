@@ -126,13 +126,25 @@ def calcular_indicadores(activos, ordenes, paros, repuestos, fecha_inicio, fecha
         tiempo_total_reparacion = fallas["tiempo_intervencion"].sum() if not fallas.empty else 0
         horas_paro = paros_equipo["tiempo_paro"].sum() if not paros_equipo.empty else 0
 
+        paros_no_programados = (
+            paros_equipo[paros_equipo["tipo_paro"] == "No programado"]
+            if not paros_equipo.empty
+            else pd.DataFrame()
+        )
+
+        horas_paro_no_programado = (
+            paros_no_programados["tiempo_paro"].sum()
+            if not paros_no_programados.empty
+            else 0
+        )
+
         horas_planificadas = (
             activo["horas_uso_dia"] *
             activo["dias_operacion_semana"] *
             semanas_periodo
         )
 
-        horas_operativas = max(horas_planificadas - horas_paro, 0)
+        horas_operativas = max(horas_planificadas - horas_paro_no_programado, 0)
 
         mtbf = horas_operativas / total_fallas if total_fallas > 0 else None
         mttr = tiempo_total_reparacion / total_fallas if total_fallas > 0 else None
@@ -493,7 +505,33 @@ elif menu == "Órdenes de trabajo":
             tabla_ordenes["Otros costos"]
         )
 
-        st.dataframe(tabla_ordenes, use_container_width=True)
+        seleccion_ordenes = st.dataframe(
+            tabla_ordenes,
+            use_container_width=True,
+            selection_mode="multi-row",
+            on_select="rerun"
+        )
+
+        st.subheader("Eliminar órdenes registradas")
+
+        if seleccion_ordenes.selection.rows:
+            ids_ordenes = [
+                int(ordenes.iloc[fila]["ID real"])
+                for fila in seleccion_ordenes.selection.rows
+            ]
+
+            if st.button("Eliminar órdenes seleccionadas"):
+                cursor = conn.cursor()
+
+                for id_orden in ids_ordenes:
+                    cursor.execute("DELETE FROM repuestos WHERE orden_id = ?", (id_orden,))
+                    cursor.execute("DELETE FROM ordenes_trabajo WHERE id = ?", (id_orden,))
+
+                conn.commit()
+                st.success("Órdenes seleccionadas eliminadas correctamente.")
+                st.rerun()
+        else:
+            st.info("Seleccione una o varias órdenes para eliminarlas.")
 
     else:
         st.info("No hay órdenes registradas.")
@@ -515,9 +553,12 @@ elif menu == "Paros de equipo":
 
             fecha_inicio = seleccionar_fecha_hora("Inicio del paro")
             fecha_fin = seleccionar_fecha_hora("Fin del paro")
-
+            tipo_paro = st.selectbox(
+                "Tipo de paro",
+                ["Programado", "No programado"]
+            )
             causa = st.text_area("Causa del paro")
-
+            
             guardar = st.form_submit_button("Guardar paro")
 
             if guardar:
@@ -537,9 +578,10 @@ elif menu == "Paros de equipo":
                             fecha_inicio,
                             fecha_fin,
                             tiempo_paro,
+                            tipo_paro,
                             causa
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         activo_id,
                         codigo_equipo,
@@ -547,6 +589,7 @@ elif menu == "Paros de equipo":
                         str(fecha_inicio),
                         str(fecha_fin),
                         tiempo_paro,
+                        tipo_paro,
                         causa
                     ))
 
@@ -564,6 +607,7 @@ elif menu == "Paros de equipo":
             fecha_inicio,
             fecha_fin,
             tiempo_paro,
+            tipo_paro,
             causa
         FROM paros
         ORDER BY fecha_inicio DESC
@@ -577,6 +621,7 @@ elif menu == "Paros de equipo":
             "fecha_inicio": "Inicio del paro",
             "fecha_fin": "Fin del paro",
             "tiempo_paro": "Tiempo de paro [h]",
+            "tipo_paro": "Tipo de paro",
             "causa": "Causa"
         })
 
@@ -720,11 +765,11 @@ elif menu == "Repuestos usados":
         })
 
         seleccion_repuestos = st.dataframe(
-    repuestos.drop(columns=["ID real"]),
-    use_container_width=True,
-    selection_mode="multi-row",
-    on_select="rerun"
-)
+            repuestos.drop(columns=["ID real"]),
+            use_container_width=True,
+            selection_mode="multi-row",
+            on_select="rerun"
+        )
 
         st.subheader("Eliminar repuestos registrados")
 
@@ -754,39 +799,38 @@ elif menu == "Base de datos":
 
     fecha_inicio, fecha_fin = rango_fechas("Fecha de inicio y fin de análisis")
 
-    activos = pd.read_sql_query("SELECT * FROM activos", conn)
-
     ordenes = pd.read_sql_query("""
         SELECT 
-            ot.id,
-            a.codigo,
-            a.nombre,
-            a.estado,
-            ot.tipo_mantenimiento,
-            ot.fecha_inicio,
-            ot.fecha_fin,
-            ot.tiempo_intervencion,
-            ot.descripcion,
-            ot.personal,
-            ot.moneda,
-            ot.costo_mano_obra,
-            ot.otros_costos
-        FROM ordenes_trabajo ot
-        JOIN activos a ON ot.activo_id = a.id
+            id,
+            codigo_equipo AS codigo,
+            nombre_equipo AS nombre,
+            tipo_mantenimiento,
+            fecha_inicio,
+            fecha_fin,
+            tiempo_intervencion,
+            descripcion,
+            personal,
+            moneda,
+            costo_mano_obra,
+            otros_costos
+        FROM ordenes_trabajo
     """, conn)
 
-    if activos.empty:
-        st.warning("No hay activos registrados.")
+    if ordenes.empty:
+        st.info("No hay registros históricos de órdenes de trabajo.")
     else:
-        equipos = ["Todos"] + (activos["codigo"] + " - " + activos["nombre"]).tolist()
+        equipos_unicos = ordenes[["codigo", "nombre"]].drop_duplicates()
+        equipos = ["Todos"] + (
+            equipos_unicos["codigo"] + " - " + equipos_unicos["nombre"]
+        ).tolist()
+
         equipo_filtro = st.selectbox("Filtrar por equipo", equipos)
 
         tipos = ["Todos", "Correctivo", "Preventivo", "Predictivo"]
         tipo_filtro = st.selectbox("Filtrar por tipo de mantenimiento", tipos)
 
-    ordenes_f = ordenes.copy()
+        ordenes_f = ordenes.copy()
 
-    if not ordenes_f.empty:
         ordenes_f["fecha_inicio"] = pd.to_datetime(ordenes_f["fecha_inicio"])
         ordenes_f["fecha_fin"] = pd.to_datetime(ordenes_f["fecha_fin"])
 
@@ -820,17 +864,6 @@ elif menu == "Base de datos":
                 "costo_mano_obra": "Costo mano de obra",
                 "otros_costos": "Otros costos"
             })
-            tabla_historial = ordenes_f.copy()
-
-            fila_total = {col: "" for col in tabla_historial.columns}
-            fila_total["Equipo"] = "TOTAL"
-            fila_total["Costo mano de obra"] = tabla_historial["Costo mano de obra"].sum()
-            fila_total["Otros costos"] = tabla_historial["Otros costos"].sum()
-
-            tabla_historial = pd.concat(
-                [tabla_historial, pd.DataFrame([fila_total])],
-                ignore_index=True
-            )
 
             tabla_historial = ordenes_f.copy()
 
@@ -845,6 +878,7 @@ elif menu == "Base de datos":
                 selection_mode="multi-row",
                 on_select="rerun"
             )
+
             st.subheader("Eliminar registros del historial")
 
             if seleccion_historial.selection.rows:
@@ -859,8 +893,14 @@ elif menu == "Base de datos":
                     cursor = conn.cursor()
 
                     for id_orden in ids_ordenes:
-                        cursor.execute("DELETE FROM repuestos WHERE orden_id = ?", (id_orden,))
-                        cursor.execute("DELETE FROM ordenes_trabajo WHERE id = ?", (id_orden,))
+                        cursor.execute(
+                            "DELETE FROM repuestos WHERE orden_id = ?",
+                            (id_orden,)
+                        )
+                        cursor.execute(
+                            "DELETE FROM ordenes_trabajo WHERE id = ?",
+                            (id_orden,)
+                        )
 
                     conn.commit()
                     st.success("Registros seleccionados eliminados del historial.")
