@@ -350,7 +350,10 @@ elif menu == "Registro de activos":
                 cursor = conn.cursor()
 
                 for id_activo in ids_seleccionados:
-                    cursor.execute("DELETE FROM activos WHERE id = ?", (id_activo,))
+                    cursor.execute(
+                        "DELETE FROM activos WHERE id = ?",
+                        (id_activo,)
+                    )
 
                 conn.commit()
                 st.success("Activos eliminados del catálogo. El historial se conserva en Base de datos.")
@@ -358,8 +361,10 @@ elif menu == "Registro de activos":
 
         if st.button("Eliminar TODOS los activos"):
             cursor = conn.cursor()
+
             cursor.execute("DELETE FROM activos")
             cursor.execute("DELETE FROM sqlite_sequence WHERE name='activos'")
+
             conn.commit()
             st.warning("Todos los activos fueron eliminados del catálogo. El historial se conserva en Base de datos.")
             st.rerun()
@@ -520,13 +525,25 @@ elif menu == "Paros de equipo":
                     st.error("La fecha final debe ser posterior a la fecha inicial.")
                 else:
                     tiempo_paro = (fecha_fin - fecha_inicio).total_seconds() / 3600
+                    codigo_equipo = activos.loc[activos["Equipo"] == equipo, "codigo"].iloc[0]
+                    nombre_equipo = activos.loc[activos["Equipo"] == equipo, "nombre"].iloc[0]
                     cursor = conn.cursor()
                     cursor.execute("""
                         INSERT INTO paros
-                        (activo_id, fecha_inicio, fecha_fin, tiempo_paro, causa)
-                        VALUES (?, ?, ?, ?, ?)
+                        (
+                            activo_id,
+                            codigo_equipo,
+                            nombre_equipo,
+                            fecha_inicio,
+                            fecha_fin,
+                            tiempo_paro,
+                            causa
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
                     """, (
                         activo_id,
+                        codigo_equipo,
+                        nombre_equipo,
                         str(fecha_inicio),
                         str(fecha_fin),
                         tiempo_paro,
@@ -541,16 +558,15 @@ elif menu == "Paros de equipo":
 
     paros = pd.read_sql_query("""
         SELECT 
-            p.id,
-            a.codigo,
-            a.nombre,
-            p.fecha_inicio,
-            p.fecha_fin,
-            p.tiempo_paro,
-            p.causa
-        FROM paros p
-        JOIN activos a ON p.activo_id = a.id
-        ORDER BY p.fecha_inicio DESC
+            id,
+            codigo_equipo AS codigo,
+            nombre_equipo AS nombre,
+            fecha_inicio,
+            fecha_fin,
+            tiempo_paro,
+            causa
+        FROM paros
+        ORDER BY fecha_inicio DESC
     """, conn)
 
     if not paros.empty:
@@ -564,7 +580,32 @@ elif menu == "Paros de equipo":
             "causa": "Causa"
         })
 
-        st.dataframe(paros.drop(columns=["ID real"]), use_container_width=True)
+        seleccion_paros = st.dataframe(
+            paros.drop(columns=["ID real"]),
+            use_container_width=True,
+            selection_mode="multi-row",
+            on_select="rerun"
+        )
+
+        st.subheader("Eliminar paros registrados")
+
+        if seleccion_paros.selection.rows:
+            ids_paros = [
+                int(paros.iloc[fila]["ID real"])
+                for fila in seleccion_paros.selection.rows
+            ]
+
+            if st.button("Eliminar paros seleccionados"):
+                cursor = conn.cursor()
+
+                for id_paro in ids_paros:
+                    cursor.execute("DELETE FROM paros WHERE id = ?", (id_paro,))
+
+                conn.commit()
+                st.success("Paros seleccionados eliminados correctamente.")
+                st.rerun()
+        else:
+            st.info("Seleccione uno o varios paros para eliminarlos.")
     else:
         st.info("No hay paros registrados.")
 
@@ -657,11 +698,10 @@ elif menu == "Repuestos usados":
             r.costo_total,
             r.moneda,
             ot.id AS orden_id,
-            a.codigo AS codigo_equipo,
-            a.nombre AS equipo
+            ot.codigo_equipo AS codigo_equipo,
+            ot.nombre_equipo AS equipo
         FROM repuestos r
         JOIN ordenes_trabajo ot ON r.orden_id = ot.id
-        JOIN activos a ON ot.activo_id = a.id
         ORDER BY r.id DESC
     """, conn)
 
@@ -679,7 +719,32 @@ elif menu == "Repuestos usados":
             "equipo": "Equipo"
         })
 
-        st.dataframe(repuestos.drop(columns=["ID real"]), use_container_width=True)
+        seleccion_repuestos = st.dataframe(
+    repuestos.drop(columns=["ID real"]),
+    use_container_width=True,
+    selection_mode="multi-row",
+    on_select="rerun"
+)
+
+        st.subheader("Eliminar repuestos registrados")
+
+        if seleccion_repuestos.selection.rows:
+            ids_repuestos = [
+                int(repuestos.iloc[fila]["ID real"])
+                for fila in seleccion_repuestos.selection.rows
+            ]
+
+            if st.button("Eliminar repuestos seleccionados"):
+                cursor = conn.cursor()
+
+                for id_repuesto in ids_repuestos:
+                    cursor.execute("DELETE FROM repuestos WHERE id = ?", (id_repuesto,))
+
+                conn.commit()
+                st.success("Repuestos seleccionados eliminados correctamente.")
+                st.rerun()
+        else:
+            st.info("Seleccione uno o varios repuestos para eliminarlos.")
     else:
         st.info("No hay repuestos registrados.")
 
