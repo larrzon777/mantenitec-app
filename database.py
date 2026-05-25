@@ -47,6 +47,8 @@ def create_tables():
     CREATE TABLE IF NOT EXISTS paros (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         activo_id INTEGER,
+        codigo_equipo TEXT,
+        nombre_equipo TEXT,
         fecha_inicio TEXT NOT NULL,
         fecha_fin TEXT NOT NULL,
         tiempo_paro REAL DEFAULT 0,
