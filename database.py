@@ -52,6 +52,7 @@ def create_tables():
         fecha_inicio TEXT NOT NULL,
         fecha_fin TEXT NOT NULL,
         tiempo_paro REAL DEFAULT 0,
+        tipo_paro TEXT DEFAULT 'No programado',
         causa TEXT
     )
     """)
