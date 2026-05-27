@@ -19,8 +19,10 @@ def create_tables():
         area TEXT NOT NULL,
         tipo_equipo TEXT NOT NULL,
         estado TEXT NOT NULL,
-        horas_uso_dia REAL DEFAULT 8,
-        dias_operacion_semana REAL DEFAULT 5
+        fecha_registro TEXT NOT NULL,
+        hora_inicio_operacion TEXT NOT NULL,
+        hora_fin_operacion TEXT NOT NULL,
+        dias_operacion TEXT NOT NULL
     )
     """)
 
