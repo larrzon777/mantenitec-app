@@ -91,18 +91,76 @@ def estado_visual(estado):
         return "🟢 Activo"
     return "🟠 Fuera de servicio"
 
+def calcular_horas_en_horario(fecha_inicio, fecha_fin, hora_inicio, hora_fin, dias_operacion):
+    inicio = pd.to_datetime(fecha_inicio)
+    fin = pd.to_datetime(fecha_fin)
+
+    hora_inicio = time.fromisoformat(hora_inicio)
+    hora_fin = time.fromisoformat(hora_fin)
+
+    dias_map = {
+        "Lunes": 0,
+        "Martes": 1,
+        "Miércoles": 2,
+        "Jueves": 3,
+        "Viernes": 4,
+        "Sábado": 5,
+        "Domingo": 6
+    }
+
+    dias_validos = [dias_map[dia] for dia in dias_operacion.split(",")]
+
+    horas = 0
+    fecha_actual = inicio.normalize()
+
+    while fecha_actual <= fin.normalize():
+        if fecha_actual.weekday() in dias_validos:
+            inicio_operacion = pd.Timestamp.combine(fecha_actual.date(), hora_inicio)
+            fin_operacion = pd.Timestamp.combine(fecha_actual.date(), hora_fin)
+
+            inicio_real = max(inicio, inicio_operacion)
+            fin_real = min(fin, fin_operacion)
+
+            if fin_real > inicio_real:
+                horas += (fin_real - inicio_real).total_seconds() / 3600
+
+        fecha_actual += pd.Timedelta(days=1)
+
+    return horas
 
 def calcular_indicadores(activos, ordenes, paros, repuestos, fecha_inicio, fecha_fin):
     ordenes_f = filtrar_por_fecha(ordenes, "fecha_inicio", fecha_inicio, fecha_fin)
     paros_f = filtrar_por_fecha(paros, "fecha_inicio", fecha_inicio, fecha_fin)
 
-    dias_periodo = (pd.to_datetime(fecha_fin) - pd.to_datetime(fecha_inicio)).days + 1
-    semanas_periodo = dias_periodo / 7
+    fecha_inicio_analisis = pd.to_datetime(fecha_inicio)
+    fecha_fin_analisis = pd.to_datetime(fecha_fin)
 
     resultados = []
 
     for _, activo in activos.iterrows():
         activo_id = activo["id"]
+
+        fecha_registro_activo = pd.to_datetime(activo["fecha_registro"])
+
+        fecha_inicio_real = max(fecha_inicio_analisis, fecha_registro_activo)
+        fecha_fin_real = fecha_fin_analisis
+
+        if fecha_inicio_real > fecha_fin_real:
+            resultados.append({
+                "Código": activo["codigo"],
+                "Equipo": activo["nombre"],
+                "Área": activo["area"],
+                "Tipo": activo["tipo_equipo"],
+                "Horas operativas": 0,
+                "Total de fallas": 0,
+                "Horas de paro": 0,
+                "MTBF [h/falla]": "No aplica",
+                "MTTR [h/falla]": "No aplica",
+                "Disponibilidad operacional [%]": "No aplica",
+                "Frecuencia de fallos [fallas/h]": "No calculable",
+                "Costo de mantenimiento por equipo": 0
+            })
+            continue
 
         ordenes_equipo = (
             ordenes_f[ordenes_f["activo_id"] == activo_id]
@@ -124,7 +182,17 @@ def calcular_indicadores(activos, ordenes, paros, repuestos, fecha_inicio, fecha
 
         total_fallas = len(fallas)
         tiempo_total_reparacion = fallas["tiempo_intervencion"].sum() if not fallas.empty else 0
-        horas_paro = paros_equipo["tiempo_paro"].sum() if not paros_equipo.empty else 0
+        
+        horas_paro = 0
+        if not paros_equipo.empty:
+            for _, paro in paros_equipo.iterrows():
+                horas_paro += calcular_horas_en_horario(
+                    paro["fecha_inicio"],
+                    paro["fecha_fin"],
+                    activo["hora_inicio_operacion"],
+                    activo["hora_fin_operacion"],
+                    activo["dias_operacion"]
+        )
 
         paros_no_programados = (
             paros_equipo[paros_equipo["tipo_paro"] == "No programado"]
@@ -132,17 +200,24 @@ def calcular_indicadores(activos, ordenes, paros, repuestos, fecha_inicio, fecha
             else pd.DataFrame()
         )
 
-        horas_paro_no_programado = (
-            paros_no_programados["tiempo_paro"].sum()
-            if not paros_no_programados.empty
-            else 0
-        )
+        horas_paro_no_programado = 0
+        if not paros_no_programados.empty:
+            for _, paro in paros_no_programados.iterrows():
+                horas_paro_no_programado += calcular_horas_en_horario(
+                    paro["fecha_inicio"],
+                    paro["fecha_fin"],
+                    activo["hora_inicio_operacion"],
+                    activo["hora_fin_operacion"],
+                    activo["dias_operacion"]
+                )
 
-        horas_planificadas = (
-            activo["horas_uso_dia"] *
-            activo["dias_operacion_semana"] *
-            semanas_periodo
-        )
+        horas_planificadas = calcular_horas_en_horario(
+        fecha_inicio_real,
+        fecha_fin_real + pd.Timedelta(days=1),
+        activo["hora_inicio_operacion"],
+        activo["hora_fin_operacion"],
+        activo["dias_operacion"]
+    )
 
         horas_operativas = max(horas_planificadas - horas_paro_no_programado, 0)
 
@@ -199,53 +274,157 @@ if menu == "Dashboard":
     if activos.empty:
         st.warning("No hay activos registrados.")
     else:
-        df_ind = calcular_indicadores(activos, ordenes, paros, repuestos, fecha_inicio, fecha_fin)
+        df_ind = calcular_indicadores(
+            activos,
+            ordenes,
+            paros,
+            repuestos,
+            fecha_inicio,
+            fecha_fin
+        )
 
-        mtbf_prom = pd.to_numeric(df_ind["MTBF [h/falla]"], errors="coerce").mean()
-        mttr_prom = pd.to_numeric(df_ind["MTTR [h/falla]"], errors="coerce").mean()
-        disp_prom = pd.to_numeric(df_ind["Disponibilidad operacional [%]"], errors="coerce").mean()
+        horas_operativas_general = pd.to_numeric(
+            df_ind["Horas operativas"],
+            errors="coerce"
+        ).sum()
+
+        total_fallas_general = pd.to_numeric(
+            df_ind["Total de fallas"],
+            errors="coerce"
+        ).sum()
+
+        horas_paro_general = pd.to_numeric(
+            df_ind["Horas de paro"],
+            errors="coerce"
+        ).sum()
+
+        costo_total_general = pd.to_numeric(
+            df_ind["Costo de mantenimiento por equipo"],
+            errors="coerce"
+        ).sum()
+
+        mttr_por_equipo = pd.to_numeric(
+            df_ind["MTTR [h/falla]"],
+            errors="coerce"
+        )
+
+        fallas_por_equipo = pd.to_numeric(
+            df_ind["Total de fallas"],
+            errors="coerce"
+        )
+
+        tiempo_reparacion_general = (
+            mttr_por_equipo * fallas_por_equipo
+        ).sum()
+
+        if total_fallas_general > 0:
+            mtbf_general = horas_operativas_general / total_fallas_general
+            mttr_general = tiempo_reparacion_general / total_fallas_general
+            disponibilidad_general = (
+                mtbf_general / (mtbf_general + mttr_general)
+            ) * 100
+        else:
+            mtbf_general = None
+            mttr_general = None
+            disponibilidad_general = None
 
         col1, col2, col3 = st.columns(3)
         col1.metric("Activos registrados", len(activos))
-        col2.metric("MTBF general", round(mtbf_prom, 2) if pd.notna(mtbf_prom) else "Sin datos")
-        col3.metric("MTTR general", round(mttr_prom, 2) if pd.notna(mttr_prom) else "Sin datos")
+        col2.metric(
+            "MTBF general",
+            round(mtbf_general, 2) if mtbf_general is not None else "Sin fallas"
+        )
+        col3.metric(
+            "MTTR general",
+            round(mttr_general, 2) if mttr_general is not None else "No aplica"
+        )
 
         col4, col5, col6 = st.columns(3)
-        col4.metric("Disponibilidad operacional", f"{round(disp_prom, 2)} %" if pd.notna(disp_prom) else "Sin datos")
-        col5.metric("Horas totales de paro", round(df_ind["Horas de paro"].sum(), 2))
-        col6.metric("Costo total mantenimiento", round(df_ind["Costo de mantenimiento por equipo"].sum(), 2))
+        col4.metric(
+            "Disponibilidad operacional",
+            f"{round(disponibilidad_general, 2)} %" if disponibilidad_general is not None else "No aplica"
+        )
+        col5.metric("Horas totales de paro", round(horas_paro_general, 2))
+        col6.metric("Costo total mantenimiento", round(costo_total_general, 2))
 
         col_g1, col_g2 = st.columns(2)
 
         with col_g1:
             st.subheader("Costos por equipo")
-            fig = px.bar(df_ind, x="Equipo", y="Costo de mantenimiento por equipo")
+            fig = px.bar(
+                df_ind,
+                x="Equipo",
+                y="Costo de mantenimiento por equipo"
+            )
             st.plotly_chart(fig, use_container_width=True)
 
         with col_g2:
             st.subheader("Horas de paro por equipo")
-            fig = px.bar(df_ind, x="Equipo", y="Horas de paro")
+            fig = px.bar(
+                df_ind,
+                x="Equipo",
+                y="Horas de paro"
+            )
             st.plotly_chart(fig, use_container_width=True)
 
         col_g3, col_g4 = st.columns(2)
 
         with col_g3:
             st.subheader("Fallas por equipo")
-            fig = px.bar(df_ind, x="Equipo", y="Total de fallas")
+            fig = px.bar(
+                df_ind,
+                x="Equipo",
+                y="Total de fallas"
+            )
             st.plotly_chart(fig, use_container_width=True)
 
         with col_g4:
             st.subheader("Distribución por tipo de intervención")
-            ordenes_f = filtrar_por_fecha(ordenes, "fecha_inicio", fecha_inicio, fecha_fin)
+
+            ordenes_f = filtrar_por_fecha(
+                ordenes,
+                "fecha_inicio",
+                fecha_inicio,
+                fecha_fin
+            )
 
             if not ordenes_f.empty:
                 dist = ordenes_f["tipo_mantenimiento"].value_counts().reset_index()
                 dist.columns = ["Tipo", "Cantidad"]
-                fig = px.pie(dist, names="Tipo", values="Cantidad")
+
+                fig = px.pie(
+                    dist,
+                    names="Tipo",
+                    values="Cantidad"
+                )
+
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.info("No hay órdenes en el período seleccionado.")
 
+        st.subheader("Distribución de paros programados y no programados")
+
+        paros_f = filtrar_por_fecha(
+            paros,
+            "fecha_inicio",
+            fecha_inicio,
+            fecha_fin
+        )
+
+        if not paros_f.empty:
+            dist_paros = paros_f["tipo_paro"].value_counts().reset_index()
+            dist_paros.columns = ["Tipo de paro", "Cantidad"]
+
+            fig = px.pie(
+                dist_paros,
+                names="Tipo de paro",
+                values="Cantidad",
+                title="Paros programados vs no programados"
+            )
+
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No hay paros registrados en el período seleccionado.")
 
 elif menu == "Registro de activos":
     st.header("Registro de activos")
@@ -262,19 +441,18 @@ elif menu == "Registro de activos":
 
         estado = st.selectbox("Estado operativo", ["Activo", "Fuera de servicio"])
 
-        horas_uso_dia = st.number_input(
-            "Horas de uso por día",
-            min_value=0.0,
-            max_value=24.0,
-            value=8.0
+        fecha_registro = st.date_input("Fecha de registro del activo")
+
+        hora_inicio_operacion = st.time_input("Hora de inicio de operación")
+        hora_fin_operacion = st.time_input("Hora de fin de operación")
+
+        dias_operacion_lista = st.multiselect(
+            "Días de operación",
+            ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"],
+            default=["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"]
         )
 
-        dias_operacion_semana = st.number_input(
-            "Días de operación por semana",
-            min_value=0.0,
-            max_value=7.0,
-            value=5.0
-        )
+        dias_operacion = ",".join(dias_operacion_lista)
 
         guardar = st.form_submit_button("Guardar activo")
 
@@ -292,18 +470,22 @@ elif menu == "Registro de activos":
                             area,
                             tipo_equipo,
                             estado,
-                            horas_uso_dia,
-                            dias_operacion_semana
+                            fecha_registro,
+                            hora_inicio_operacion,
+                            hora_fin_operacion,
+                            dias_operacion
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         codigo,
                         nombre,
                         area,
                         tipo_equipo,
                         estado,
-                        horas_uso_dia,
-                        dias_operacion_semana
+                        str(fecha_registro),
+                        str(hora_inicio_operacion),
+                        str(hora_fin_operacion),
+                        dias_operacion
                     ))
                     conn.commit()
                     st.success("Activo guardado correctamente.")
@@ -321,8 +503,10 @@ elif menu == "Registro de activos":
             area,
             tipo_equipo,
             estado,
-            horas_uso_dia,
-            dias_operacion_semana
+            fecha_registro,
+            hora_inicio_operacion,
+            hora_fin_operacion,
+            dias_operacion
         FROM activos
     """, conn)
 
@@ -333,8 +517,10 @@ elif menu == "Registro de activos":
         "area": "Área",
         "tipo_equipo": "Tipo de equipo",
         "estado": "Estado",
-        "horas_uso_dia": "Horas de uso por día",
-        "dias_operacion_semana": "Días de operación por semana"
+        "fecha_registro": "Fecha de registro",
+        "hora_inicio_operacion": "Hora inicio operación",
+        "hora_fin_operacion": "Hora fin operación",
+        "dias_operacion": "Días de operación"
     })
 
     activos["Estado"] = activos["Estado"].apply(estado_visual)
@@ -385,7 +571,17 @@ elif menu == "Registro de activos":
 elif menu == "Órdenes de trabajo":
     st.header("Órdenes de trabajo")
 
-    activos = pd.read_sql_query("SELECT id, codigo, nombre FROM activos", conn)
+    activos = pd.read_sql_query("""
+        SELECT 
+            id,
+            codigo,
+            nombre,
+            fecha_registro,
+            hora_inicio_operacion,
+            hora_fin_operacion,
+            dias_operacion
+        FROM activos
+    """, conn)
 
     if activos.empty:
         st.warning("Primero debes registrar al menos un activo.")
@@ -415,10 +611,26 @@ elif menu == "Órdenes de trabajo":
             guardar = st.form_submit_button("Guardar orden de trabajo")
 
             if guardar:
+                fecha_registro_activo = pd.to_datetime(
+                    activos.loc[activos["Equipo"] == equipo, "fecha_registro"].iloc[0]
+                )
+
                 if fecha_fin <= fecha_inicio:
                     st.error("La fecha final debe ser posterior a la fecha inicial.")
+                elif fecha_inicio < fecha_registro_activo:
+                    st.error("No se puede registrar una orden antes de la fecha de registro del activo.")
                 else:
-                    tiempo_intervencion = (fecha_fin - fecha_inicio).total_seconds() / 3600
+                    hora_inicio_operacion = activos.loc[activos["Equipo"] == equipo, "hora_inicio_operacion"].iloc[0]
+                    hora_fin_operacion = activos.loc[activos["Equipo"] == equipo, "hora_fin_operacion"].iloc[0]
+                    dias_operacion = activos.loc[activos["Equipo"] == equipo, "dias_operacion"].iloc[0]
+
+                    tiempo_intervencion = calcular_horas_en_horario(
+                        fecha_inicio,
+                        fecha_fin,
+                        hora_inicio_operacion,
+                        hora_fin_operacion,
+                        dias_operacion
+                    )
                     es_falla = 1 if tipo_mantenimiento == "Correctivo" else 0
 
                     codigo_equipo = activos.loc[activos["Equipo"] == equipo, "codigo"].iloc[0]
@@ -540,7 +752,17 @@ elif menu == "Órdenes de trabajo":
 elif menu == "Paros de equipo":
     st.header("Paros de equipo")
 
-    activos = pd.read_sql_query("SELECT id, codigo, nombre FROM activos", conn)
+    activos = pd.read_sql_query("""
+        SELECT 
+            id,
+            codigo,
+            nombre,
+            fecha_registro,
+            hora_inicio_operacion,
+            hora_fin_operacion,
+            dias_operacion
+        FROM activos
+    """, conn)
 
     if activos.empty:
         st.warning("Primero debes registrar al menos un activo.")
@@ -562,10 +784,26 @@ elif menu == "Paros de equipo":
             guardar = st.form_submit_button("Guardar paro")
 
             if guardar:
+                fecha_registro_activo = pd.to_datetime(
+                    activos.loc[activos["Equipo"] == equipo, "fecha_registro"].iloc[0]
+                )
+
                 if fecha_fin <= fecha_inicio:
                     st.error("La fecha final debe ser posterior a la fecha inicial.")
+                elif fecha_inicio < fecha_registro_activo:
+                    st.error("No se puede registrar un paro antes de la fecha de registro del activo.")
                 else:
-                    tiempo_paro = (fecha_fin - fecha_inicio).total_seconds() / 3600
+                    hora_inicio_operacion = activos.loc[activos["Equipo"] == equipo, "hora_inicio_operacion"].iloc[0]
+                    hora_fin_operacion = activos.loc[activos["Equipo"] == equipo, "hora_fin_operacion"].iloc[0]
+                    dias_operacion = activos.loc[activos["Equipo"] == equipo, "dias_operacion"].iloc[0]
+
+                    tiempo_paro = calcular_horas_en_horario(
+                        fecha_inicio,
+                        fecha_fin,
+                        hora_inicio_operacion,
+                        hora_fin_operacion,
+                        dias_operacion
+                    )
                     codigo_equipo = activos.loc[activos["Equipo"] == equipo, "codigo"].iloc[0]
                     nombre_equipo = activos.loc[activos["Equipo"] == equipo, "nombre"].iloc[0]
                     cursor = conn.cursor()
@@ -764,8 +1002,22 @@ elif menu == "Repuestos usados":
             "equipo": "Equipo"
         })
 
+        tabla_repuestos = repuestos.drop(columns=["ID real", "Orden de trabajo"]).copy()
+        tabla_repuestos = tabla_repuestos[
+            [
+                "Código equipo",
+                "Equipo",
+                "Código del repuesto",
+                "Descripción",
+                "Cantidad utilizada",
+                "Costo unitario",
+                "Costo total por intervención",
+                "Moneda"
+            ]
+        ]
+
         seleccion_repuestos = st.dataframe(
-            repuestos.drop(columns=["ID real"]),
+            tabla_repuestos,
             use_container_width=True,
             selection_mode="multi-row",
             on_select="rerun"
@@ -799,118 +1051,416 @@ elif menu == "Base de datos":
 
     fecha_inicio, fecha_fin = rango_fechas("Fecha de inicio y fin de análisis")
 
-    ordenes = pd.read_sql_query("""
-        SELECT 
-            id,
-            codigo_equipo AS codigo,
-            nombre_equipo AS nombre,
-            tipo_mantenimiento,
-            fecha_inicio,
-            fecha_fin,
-            tiempo_intervencion,
-            descripcion,
-            personal,
-            moneda,
-            costo_mano_obra,
-            otros_costos
-        FROM ordenes_trabajo
-    """, conn)
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "Activos registrados",
+        "Órdenes de trabajo",
+        "Paros de equipo",
+        "Repuestos usados"
+    ])
 
-    if ordenes.empty:
-        st.info("No hay registros históricos de órdenes de trabajo.")
-    else:
-        equipos_unicos = ordenes[["codigo", "nombre"]].drop_duplicates()
-        equipos = ["Todos"] + (
-            equipos_unicos["codigo"] + " - " + equipos_unicos["nombre"]
-        ).tolist()
+    with tab1:
+        st.subheader("Activos registrados")
 
-        equipo_filtro = st.selectbox("Filtrar por equipo", equipos)
+        activos_bd = pd.read_sql_query("""
+            SELECT
+                codigo,
+                nombre,
+                area,
+                tipo_equipo,
+                estado,
+                fecha_registro,
+                hora_inicio_operacion,
+                hora_fin_operacion,
+                dias_operacion
+            FROM activos
+        """, conn)
 
-        tipos = ["Todos", "Correctivo", "Preventivo", "Predictivo"]
-        tipo_filtro = st.selectbox("Filtrar por tipo de mantenimiento", tipos)
+        if activos_bd.empty:
+            st.info("No hay activos registrados.")
+        else:
+            equipos = ["Todos"] + (
+                activos_bd["codigo"] + " - " + activos_bd["nombre"]
+            ).tolist()
 
-        ordenes_f = ordenes.copy()
+            col_f1, col_f2 = st.columns(2)
 
-        ordenes_f["fecha_inicio"] = pd.to_datetime(ordenes_f["fecha_inicio"])
-        ordenes_f["fecha_fin"] = pd.to_datetime(ordenes_f["fecha_fin"])
+            with col_f1:
+                equipo_filtro = st.selectbox(
+                    "Filtrar por equipo",
+                    equipos,
+                    key="filtro_equipo_activos"
+                )
 
-        fecha_inicio_filtro = pd.to_datetime(fecha_inicio)
-        fecha_fin_filtro = pd.to_datetime(fecha_fin) + pd.Timedelta(days=1)
+            with col_f2:
+                estado_filtro = st.selectbox(
+                    "Filtrar por estado",
+                    ["Todos", "Activo", "Fuera de servicio"],
+                    key="filtro_estado_activos"
+                )
 
-        ordenes_f = ordenes_f[
-            (ordenes_f["fecha_inicio"] >= fecha_inicio_filtro) &
-            (ordenes_f["fecha_fin"] < fecha_fin_filtro)
-        ]
+            activos_f = activos_bd.copy()
 
-        if equipo_filtro != "Todos":
-            codigo_equipo = equipo_filtro.split(" - ")[0]
-            ordenes_f = ordenes_f[ordenes_f["codigo"] == codigo_equipo]
+            activos_f["fecha_registro"] = pd.to_datetime(activos_f["fecha_registro"])
 
-        if tipo_filtro != "Todos":
-            ordenes_f = ordenes_f[ordenes_f["tipo_mantenimiento"] == tipo_filtro]
+            fecha_inicio_filtro = pd.to_datetime(fecha_inicio)
+            fecha_fin_filtro = pd.to_datetime(fecha_fin) + pd.Timedelta(days=1)
 
-        if not ordenes_f.empty:
-            ordenes_f = ordenes_f.rename(columns={
-                "id": "ID",
+            activos_f = activos_f[
+                (activos_f["fecha_registro"] >= fecha_inicio_filtro) &
+                (activos_f["fecha_registro"] < fecha_fin_filtro)
+            ]
+
+            if equipo_filtro != "Todos":
+                codigo_equipo = equipo_filtro.split(" - ")[0]
+                activos_f = activos_f[activos_f["codigo"] == codigo_equipo]
+
+            if estado_filtro != "Todos":
+                activos_f = activos_f[activos_f["estado"] == estado_filtro]
+
+            activos_f = activos_f.rename(columns={
                 "codigo": "Código",
                 "nombre": "Equipo",
-                "tipo_mantenimiento": "Tipo de mantenimiento",
-                "fecha_inicio": "Fecha de inicio",
-                "fecha_fin": "Fecha de fin",
-                "tiempo_intervencion": "Tiempo intervención [h]",
-                "descripcion": "Descripción",
-                "personal": "Personal",
-                "moneda": "Moneda",
-                "costo_mano_obra": "Costo mano de obra",
-                "otros_costos": "Otros costos"
+                "area": "Área",
+                "tipo_equipo": "Tipo de equipo",
+                "estado": "Estado",
+                "fecha_registro": "Fecha de registro",
+                "hora_inicio_operacion": "Hora inicio operación",
+                "hora_fin_operacion": "Hora fin operación",
+                "dias_operacion": "Días de operación"
             })
 
-            tabla_historial = ordenes_f.copy()
+            activos_f["Estado"] = activos_f["Estado"].apply(estado_visual)
 
-            tabla_historial["Costo total"] = (
-                tabla_historial["Costo mano de obra"] +
-                tabla_historial["Otros costos"]
+            if activos_f.empty:
+                st.info("No hay activos para los filtros seleccionados.")
+            else:
+                st.dataframe(activos_f, use_container_width=True)
+
+    with tab2:
+        st.subheader("Historial de órdenes de trabajo")
+
+        ordenes = pd.read_sql_query("""
+            SELECT 
+                id,
+                codigo_equipo AS codigo,
+                nombre_equipo AS nombre,
+                tipo_mantenimiento,
+                fecha_inicio,
+                fecha_fin,
+                tiempo_intervencion,
+                descripcion,
+                personal,
+                moneda,
+                costo_mano_obra,
+                otros_costos
+            FROM ordenes_trabajo
+        """, conn)
+
+        if ordenes.empty:
+            st.info("No hay órdenes de trabajo registradas.")
+        else:
+            equipos_unicos = ordenes[["codigo", "nombre"]].drop_duplicates()
+            equipos = ["Todos"] + (
+                equipos_unicos["codigo"] + " - " + equipos_unicos["nombre"]
+            ).tolist()
+
+            col_f1, col_f2 = st.columns(2)
+
+            with col_f1:
+                equipo_filtro = st.selectbox(
+                    "Filtrar órdenes por equipo",
+                    equipos,
+                    key="filtro_equipo_ordenes"
+                )
+
+            with col_f2:
+                tipo_filtro = st.selectbox(
+                    "Filtrar por tipo de mantenimiento",
+                    ["Todos", "Correctivo", "Preventivo", "Predictivo"],
+                    key="filtro_tipo_ordenes"
+                )
+
+            ordenes_f = ordenes.copy()
+            ordenes_f["fecha_inicio"] = pd.to_datetime(ordenes_f["fecha_inicio"])
+            ordenes_f["fecha_fin"] = pd.to_datetime(ordenes_f["fecha_fin"])
+
+            fecha_inicio_filtro = pd.to_datetime(fecha_inicio)
+            fecha_fin_filtro = pd.to_datetime(fecha_fin) + pd.Timedelta(days=1)
+
+            ordenes_f = ordenes_f[
+                (ordenes_f["fecha_inicio"] >= fecha_inicio_filtro) &
+                (ordenes_f["fecha_fin"] < fecha_fin_filtro)
+            ]
+
+            if equipo_filtro != "Todos":
+                codigo_equipo = equipo_filtro.split(" - ")[0]
+                ordenes_f = ordenes_f[ordenes_f["codigo"] == codigo_equipo]
+
+            if tipo_filtro != "Todos":
+                ordenes_f = ordenes_f[ordenes_f["tipo_mantenimiento"] == tipo_filtro]
+
+            if ordenes_f.empty:
+                st.info("No hay órdenes para los filtros seleccionados.")
+            else:
+                ordenes_f = ordenes_f.rename(columns={
+                    "id": "ID",
+                    "codigo": "Código",
+                    "nombre": "Equipo",
+                    "tipo_mantenimiento": "Tipo de mantenimiento",
+                    "fecha_inicio": "Fecha de inicio",
+                    "fecha_fin": "Fecha de fin",
+                    "tiempo_intervencion": "Tiempo intervención [h]",
+                    "descripcion": "Descripción",
+                    "personal": "Personal",
+                    "moneda": "Moneda",
+                    "costo_mano_obra": "Costo mano de obra",
+                    "otros_costos": "Otros costos"
+                })
+
+                ordenes_f["Costo total"] = (
+                    ordenes_f["Costo mano de obra"] +
+                    ordenes_f["Otros costos"]
+                )
+
+                seleccion_historial = st.dataframe(
+                    ordenes_f,
+                    use_container_width=True,
+                    selection_mode="multi-row",
+                    on_select="rerun"
+                )
+
+                st.subheader("Eliminar órdenes del historial")
+
+                if seleccion_historial.selection.rows:
+                    ids_ordenes = [
+                        int(ordenes_f.iloc[fila]["ID"])
+                        for fila in seleccion_historial.selection.rows
+                    ]
+
+                    if st.button("Eliminar órdenes seleccionadas", key="btn_eliminar_ordenes_bd"):
+                        cursor = conn.cursor()
+
+                        for id_orden in ids_ordenes:
+                            cursor.execute("DELETE FROM repuestos WHERE orden_id = ?", (id_orden,))
+                            cursor.execute("DELETE FROM ordenes_trabajo WHERE id = ?", (id_orden,))
+
+                        conn.commit()
+                        st.success("Órdenes seleccionadas eliminadas del historial.")
+                        st.rerun()
+                else:
+                    st.info("Seleccione una o varias órdenes para eliminarlas.")
+
+    with tab3:
+        st.subheader("Historial de paros de equipo")
+
+        paros = pd.read_sql_query("""
+            SELECT 
+                id,
+                codigo_equipo AS codigo,
+                nombre_equipo AS nombre,
+                fecha_inicio,
+                fecha_fin,
+                tiempo_paro,
+                tipo_paro,
+                causa
+            FROM paros
+        """, conn)
+
+        if paros.empty:
+            st.info("No hay paros registrados.")
+        else:
+            equipos_unicos = paros[["codigo", "nombre"]].drop_duplicates()
+            equipos = ["Todos"] + (
+                equipos_unicos["codigo"] + " - " + equipos_unicos["nombre"]
+            ).tolist()
+
+            col_f1, col_f2 = st.columns(2)
+
+            with col_f1:
+                equipo_filtro = st.selectbox(
+                    "Filtrar paros por equipo",
+                    equipos,
+                    key="filtro_equipo_paros"
+                )
+
+            with col_f2:
+                tipo_paro_filtro = st.selectbox(
+                    "Filtrar por tipo de paro",
+                    ["Todos", "Programado", "No programado"],
+                    key="filtro_tipo_paro"
+                )
+
+            paros_f = paros.copy()
+            paros_f["fecha_inicio"] = pd.to_datetime(paros_f["fecha_inicio"])
+            paros_f["fecha_fin"] = pd.to_datetime(paros_f["fecha_fin"])
+
+            fecha_inicio_filtro = pd.to_datetime(fecha_inicio)
+            fecha_fin_filtro = pd.to_datetime(fecha_fin) + pd.Timedelta(days=1)
+
+            paros_f = paros_f[
+                (paros_f["fecha_inicio"] >= fecha_inicio_filtro) &
+                (paros_f["fecha_fin"] < fecha_fin_filtro)
+            ]
+
+            if equipo_filtro != "Todos":
+                codigo_equipo = equipo_filtro.split(" - ")[0]
+                paros_f = paros_f[paros_f["codigo"] == codigo_equipo]
+
+            if tipo_paro_filtro != "Todos":
+                paros_f = paros_f[paros_f["tipo_paro"] == tipo_paro_filtro]
+
+            if paros_f.empty:
+                st.info("No hay paros para los filtros seleccionados.")
+            else:
+                paros_f = paros_f.rename(columns={
+                    "id": "ID",
+                    "codigo": "Código",
+                    "nombre": "Equipo",
+                    "fecha_inicio": "Fecha de inicio",
+                    "fecha_fin": "Fecha de fin",
+                    "tiempo_paro": "Tiempo de paro [h]",
+                    "tipo_paro": "Tipo de paro",
+                    "causa": "Causa"
+                })
+
+                seleccion_paros_bd = st.dataframe(
+                    paros_f,
+                    use_container_width=True,
+                    selection_mode="multi-row",
+                    on_select="rerun"
+                )
+
+                st.subheader("Eliminar paros del historial")
+
+                if seleccion_paros_bd.selection.rows:
+                    ids_paros = [
+                        int(paros_f.iloc[fila]["ID"])
+                        for fila in seleccion_paros_bd.selection.rows
+                    ]
+
+                    if st.button("Eliminar paros seleccionados", key="btn_eliminar_paros_bd"):
+                        cursor = conn.cursor()
+
+                        for id_paro in ids_paros:
+                            cursor.execute("DELETE FROM paros WHERE id = ?", (id_paro,))
+
+                        conn.commit()
+                        st.success("Paros seleccionados eliminados del historial.")
+                        st.rerun()
+                else:
+                    st.info("Seleccione uno o varios paros para eliminarlos.")
+
+    with tab4:
+        st.subheader("Historial de repuestos usados")
+
+        repuestos = pd.read_sql_query("""
+            SELECT
+                r.id,
+                r.codigo,
+                ot.nombre_equipo AS equipo,
+                r.descripcion,
+                r.cantidad_utilizada,
+                r.costo_unitario,
+                r.costo_total,
+                r.moneda,
+                ot.id AS orden_id,
+                ot.codigo_equipo AS codigo_equipo,
+                ot.fecha_inicio AS fecha_inicio,
+                ot.fecha_fin AS fecha_fin
+            FROM repuestos r
+            JOIN ordenes_trabajo ot ON r.orden_id = ot.id
+        """, conn)
+
+        if repuestos.empty:
+            st.info("No hay repuestos registrados.")
+        else:
+            equipos_unicos = repuestos[["codigo_equipo", "equipo"]].drop_duplicates()
+            equipos = ["Todos"] + (
+                equipos_unicos["codigo_equipo"] + " - " + equipos_unicos["equipo"]
+            ).tolist()
+
+            equipo_filtro = st.selectbox(
+                "Filtrar repuestos por equipo",
+                equipos,
+                key="filtro_equipo_repuestos"
             )
 
-            seleccion_historial = st.dataframe(
-                tabla_historial,
-                use_container_width=True,
-                selection_mode="multi-row",
-                on_select="rerun"
-            )
+            repuestos_f = repuestos.copy()
+            repuestos_f["fecha_inicio"] = pd.to_datetime(repuestos_f["fecha_inicio"])
+            repuestos_f["fecha_fin"] = pd.to_datetime(repuestos_f["fecha_fin"])
 
-            st.subheader("Eliminar registros del historial")
+            fecha_inicio_filtro = pd.to_datetime(fecha_inicio)
+            fecha_fin_filtro = pd.to_datetime(fecha_fin) + pd.Timedelta(days=1)
 
-            if seleccion_historial.selection.rows:
-                ids_ordenes = [
-                    int(ordenes_f.iloc[fila]["ID"])
-                    for fila in seleccion_historial.selection.rows
+            repuestos_f = repuestos_f[
+                (repuestos_f["fecha_inicio"] >= fecha_inicio_filtro) &
+                (repuestos_f["fecha_fin"] < fecha_fin_filtro)
+            ]
+
+            if equipo_filtro != "Todos":
+                codigo_equipo = equipo_filtro.split(" - ")[0]
+                repuestos_f = repuestos_f[repuestos_f["codigo_equipo"] == codigo_equipo]
+
+            if repuestos_f.empty:
+                st.info("No hay repuestos para los filtros seleccionados.")
+            else:
+                repuestos_f = repuestos_f.rename(columns={
+                    "id": "ID",
+                    "codigo": "Código del repuesto",
+                    "equipo": "Equipo",
+                    "descripcion": "Descripción",
+                    "cantidad_utilizada": "Cantidad utilizada",
+                    "costo_unitario": "Costo unitario",
+                    "costo_total": "Costo total",
+                    "moneda": "Moneda",
+                    "orden_id": "Orden de trabajo",
+                    "codigo_equipo": "Código equipo",
+                    "fecha_inicio": "Fecha de inicio",
+                    "fecha_fin": "Fecha de fin"
+                })
+
+                repuestos_f = repuestos_f[
+                    [
+                        "ID",
+                        "Código equipo",
+                        "Equipo",
+                        "Código del repuesto",
+                        "Descripción",
+                        "Cantidad utilizada",
+                        "Costo unitario",
+                        "Costo total",
+                        "Moneda",
+                        "Fecha de inicio",
+                        "Fecha de fin"
+                    ]
                 ]
 
-                st.warning(f"Órdenes seleccionadas: {ids_ordenes}")
+                seleccion_repuestos_bd = st.dataframe(
+                    repuestos_f,
+                    use_container_width=True,
+                    selection_mode="multi-row",
+                    on_select="rerun"
+                )
 
-                if st.button("Eliminar órdenes seleccionadas del historial"):
-                    cursor = conn.cursor()
+                st.subheader("Eliminar repuestos del historial")
 
-                    for id_orden in ids_ordenes:
-                        cursor.execute(
-                            "DELETE FROM repuestos WHERE orden_id = ?",
-                            (id_orden,)
-                        )
-                        cursor.execute(
-                            "DELETE FROM ordenes_trabajo WHERE id = ?",
-                            (id_orden,)
-                        )
+                if seleccion_repuestos_bd.selection.rows:
+                    ids_repuestos = [
+                        int(repuestos_f.iloc[fila]["ID"])
+                        for fila in seleccion_repuestos_bd.selection.rows
+                    ]
 
-                    conn.commit()
-                    st.success("Registros seleccionados eliminados del historial.")
-                    st.rerun()
-            else:
-                st.info("Seleccione una o varias filas del historial para eliminarlas.")
+                    if st.button("Eliminar repuestos seleccionados", key="btn_eliminar_repuestos_bd"):
+                        cursor = conn.cursor()
 
-        else:
-            st.info("No hay datos para los filtros seleccionados.")
+                        for id_repuesto in ids_repuestos:
+                            cursor.execute("DELETE FROM repuestos WHERE id = ?", (id_repuesto,))
 
+                        conn.commit()
+                        st.success("Repuestos seleccionados eliminados del historial.")
+                        st.rerun()
+                else:
+                    st.info("Seleccione uno o varios repuestos para eliminarlos.")
 
 elif menu == "Indicadores":
     st.header("Indicadores obligatorios de mantenimiento")
